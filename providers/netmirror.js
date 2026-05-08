@@ -142,62 +142,64 @@ function getUnixTime() {
 }
 
 // src/netmirror/index.js
-var TMDB_PROVIDER_MAP = {
-  8: "netflix",
-  119: "primevideo",
-  122: "hotstar",
-  337: "disney",
-};
-
-function getPlatformOrder(providers) {
-  const detected = providers
-    .map((id) => TMDB_PROVIDER_MAP[id])
-    .filter(Boolean);
-
-  const remaining = ["netflix", "primevideo", "hotstar", "disney"].filter(
-    (p) => !detected.includes(p)
-  );
-
-  return [...detected, ...remaining];
+function normalize(str) {
+  return str.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "");
 }
 
-async function getStreams(tmdbId, mediaType, season, episode) {
-  console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
-  try {
-    const cookie = await bypass();
-    const cookies = `t_hash_t=${cookie}; hd=on`;
-    const tmdbType = mediaType === "tv" ? "tv" : "movie";
+function similarity(a, b) {
+  a = normalize(a);
+  b = normalize(b);
 
-    const [tmdbData, providersData] = await Promise.all([
-      fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
-      fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
-    ]);
+  // Match exato
+  if (a === b) return 1;
 
-    const title = mediaType === "tv" ? tmdbData.name : tmdbData.title;
-    if (!title) throw new Error("Could not fetch title from TMDB");
+  const wordsA = a.split(/\s+/);
+  const wordsB = b.split(/\s+/);
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
 
-    const regionProviders = providersData.results?.IN ?? {};
-    const providerIds = [
-      ...(regionProviders.flatrate ?? []),
-      ...(regionProviders.free ?? []),
-      ...(regionProviders.ads ?? []),
-    ].map((p) => p.provider_id);
+  // Jaccard: palavras em comum / união
+  const intersection = [...setA].filter((w) => setB.has(w)).length;
+  const union = new Set([...setA, ...setB]).size;
+  const jaccard = intersection / union;
 
-    const platformOrder = getPlatformOrder(providerIds);
-    console.log(`[NetMirror] Platform order for "${title}": ${platformOrder.join(", ")}`);
+  // Penaliza diferença de tamanho entre os títulos
+  const lengthPenalty = 1 - Math.abs(wordsA.length - wordsB.length) / Math.max(wordsA.length, wordsB.length);
 
-    for (const platformKey of platformOrder) {
-      const streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies);
-      if (streams && streams.length > 0) return streams;
+  return jaccard * 0.7 + lengthPenalty * 0.3;
+}
+
+function bestMatch(results, title) {
+  return results
+    .map((r) => ({ ...r, score: similarity(r.t, title) }))
+    .sort((a, b) => b.score - a.score)[0];
+}
+
+function getStreams(tmdbId, mediaType, season, episode) {
+  return __async(this, null, function* () {
+    console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
+    try {
+      const cookie = yield bypass();
+      const cookies = `t_hash_t=${cookie}; hd=on`;
+      const tmdbType = mediaType === "tv" ? "tv" : "movie";
+      const tmdbResp = yield fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
+      const tmdbData = yield tmdbResp.json();
+      const title = mediaType === "tv" ? tmdbData.name : tmdbData.title;
+      if (!title)
+        throw new Error("Could not fetch title from TMDB");
+      const platforms = ["netflix", "primevideo", "hotstar", "disney"];
+      for (const platformKey of platforms) {
+        const streams = yield fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies);
+        if (streams && streams.length > 0)
+          return streams;
+      }
+      return [];
+    } catch (error) {
+      console.error(`[NetMirror] Error: ${error.message}`);
+      return [];
     }
-
-    return [];
-  } catch (error) {
-    console.error(`[NetMirror] Error: ${error.message}`);
-    return [];
-  }
+  });
 }
-
 function fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies) {
   return __async(this, null, function* () {
     const platform = PLATFORM_MAP[platformKey];
@@ -209,10 +211,10 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     if (!searchData.searchResult || searchData.searchResult.length === 0)
       return null;
 
-    // LOG TEMPORÁRIO — remover após inspeção
-    return [{ __debug: true, searchResultSample: searchData.searchResult[0] }];
-    const result = searchData.searchResult[0];
-    const contentId = result.id;
+    const best = bestMatch(searchData.searchResult, title);
+    if (!best || best.score < 0.5) return null;
+
+    const contentId = best.id;
     const postUrl = `${NETMIRROR_URL}${platform.post}?id=${contentId}&t=${getUnixTime()}`;
     const postResp = yield fetch(postUrl, {
       headers: __spreadProps(__spreadValues({}, BASE_HEADERS), { Cookie: `${cookies}; ott=${platform.ott}` })
