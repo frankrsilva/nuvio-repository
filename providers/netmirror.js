@@ -64,6 +64,15 @@ var PLATFORM_MAP = {
     img: "pv/v",
     epImg: "pvepimg"
   },
+  hotstar: {
+    ott: "hs",
+    search: "/mobile/hs/search.php",
+    post: "/mobile/hs/post.php",
+    episodes: "/mobile/hs/episodes.php",
+    playlist: "/mobile/hs/playlist.php",
+    img: "hs/v",
+    epImg: "hsepimg"
+  },
   disney: {
     ott: "hs",
     search: "/mobile/hs/search.php",
@@ -136,6 +145,7 @@ function getUnixTime() {
 var TMDB_PROVIDER_MAP = {
   8: "netflix",
   119: "primevideo",
+  122: "hotstar",
   337: "disney",
 };
 
@@ -144,7 +154,7 @@ function getPlatformOrder(providers) {
     .map((id) => TMDB_PROVIDER_MAP[id])
     .filter(Boolean);
 
-  const remaining = ["netflix", "primevideo", "disney"].filter(
+  const remaining = ["netflix", "primevideo", "hotstar", "disney"].filter(
     (p) => !detected.includes(p)
   );
 
