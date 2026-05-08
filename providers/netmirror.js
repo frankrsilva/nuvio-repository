@@ -171,6 +171,13 @@ function similarity(a, b) {
 }
 
 function bestMatch(results, title) {
+  const normalizedTitle = normalize(title);
+
+  // Tenta match exato primeiro
+  const exact = results.find((r) => normalize(r.t) === normalizedTitle);
+  if (exact) return exact;
+
+  // Só cai no similarity se não achar exato
   return results
     .map((r) => ({ ...r, score: similarity(r.t, title) }))
     .sort((a, b) => b.score - a.score)[0];
