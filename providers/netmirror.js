@@ -150,23 +150,24 @@ function similarity(a, b) {
   a = normalize(a);
   b = normalize(b);
 
-  // Match exato
   if (a === b) return 1;
 
-  const wordsA = a.split(/\s+/);
-  const wordsB = b.split(/\s+/);
+  const wordsA = a.split(/\s+/); // título buscado
+  const wordsB = b.split(/\s+/); // resultado
   const setA = new Set(wordsA);
   const setB = new Set(wordsB);
 
-  // Jaccard: palavras em comum / união
-  const intersection = [...setA].filter((w) => setB.has(w)).length;
-  const union = new Set([...setA, ...setB]).size;
-  const jaccard = intersection / union;
+  // Quantas palavras do buscado estão no resultado
+  const coverage = [...setA].filter((w) => setB.has(w)).length / setA.size;
 
-  // Penaliza diferença de tamanho entre os títulos
+  // Palavras extras no resultado que não existem no buscado
+  const extraWords = [...setB].filter((w) => !setA.has(w)).length;
+  const extraPenalty = 1 - extraWords / wordsB.length;
+
+  // Penaliza diferença de tamanho
   const lengthPenalty = 1 - Math.abs(wordsA.length - wordsB.length) / Math.max(wordsA.length, wordsB.length);
 
-  return jaccard * 0.7 + lengthPenalty * 0.3;
+  return coverage * 0.5 + extraPenalty * 0.35 + lengthPenalty * 0.15;
 }
 
 function bestMatch(results, title) {
