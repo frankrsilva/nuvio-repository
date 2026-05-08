@@ -158,7 +158,7 @@ function getPlatformOrder(providers) {
     (p) => !detected.includes(p)
   );
 
-  return [...detected, ...remaining];
+  return detected.length > 0 ? detected : remaining;
 }
 
 function normalize(str) {
