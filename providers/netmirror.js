@@ -206,6 +206,7 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
       headers: __spreadProps(__spreadValues({}, BASE_HEADERS), { Cookie: `${cookies}; ott=${platform.ott}` })
     });
     const searchData = yield searchResp.json();
+    console.log(`[NetMirror] searchResult sample (${platformKey}):`, JSON.stringify(searchData.searchResult?.[0], null, 2));
     if (!searchData.searchResult || searchData.searchResult.length === 0)
       return null;
     const result = searchData.searchResult[0];
