@@ -174,7 +174,7 @@ async function fetchSubtitles(tmdbId, mediaType, season, episode) {
       const langCode = (sub.language || "").toUpperCase();
       if (!sub.url) continue;
 
-      langCount[langCode] = (langCount[langCode] || 0);
+      langCount[langCode] = langCount[langCode] || 0;
       if (langCount[langCode] >= MAX_SUBTITLES_PER_LANG) continue;
       langCount[langCode]++;
 
@@ -182,9 +182,12 @@ async function fetchSubtitles(tmdbId, mediaType, season, episode) {
         ? sub.url
         : `${SUBDL_DOWNLOAD_URL}${sub.url}`;
 
+      // 'id' é obrigatório pelo protocolo do Nuvio (interface Subtitle)
       subtitles.push({
+        id: sub.sd_id ? String(sub.sd_id) : `subdl-${langCode}-${langCount[langCode]}`,
         url: fullUrl,
         lang: SUBDL_LANG_LABELS[langCode] || langCode,
+        format: "srt",
       });
     }
 
