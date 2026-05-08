@@ -142,6 +142,25 @@ function getUnixTime() {
 }
 
 // src/netmirror/index.js
+var TMDB_PROVIDER_MAP = {
+  8: "netflix",
+  119: "primevideo",
+  122: "hotstar",
+  337: "disney",
+};
+
+function getPlatformOrder(providers) {
+  const detected = providers
+    .map((id) => TMDB_PROVIDER_MAP[id])
+    .filter(Boolean);
+
+  const remaining = ["netflix", "primevideo", "hotstar", "disney"].filter(
+    (p) => !detected.includes(p)
+  );
+
+  return [...detected, ...remaining];
+}
+
 function normalize(str) {
   return str.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "");
 }
@@ -183,31 +202,43 @@ function bestMatch(results, title) {
     .sort((a, b) => b.score - a.score)[0];
 }
 
-function getStreams(tmdbId, mediaType, season, episode) {
-  return __async(this, null, function* () {
-    console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
-    try {
-      const cookie = yield bypass();
-      const cookies = `t_hash_t=${cookie}; hd=on`;
-      const tmdbType = mediaType === "tv" ? "tv" : "movie";
-      const tmdbResp = yield fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
-      const tmdbData = yield tmdbResp.json();
-      const title = mediaType === "tv" ? tmdbData.name : tmdbData.title;
-      if (!title)
-        throw new Error("Could not fetch title from TMDB");
-      const platforms = ["netflix", "primevideo", "hotstar", "disney"];
-      for (const platformKey of platforms) {
-        const streams = yield fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies);
-        if (streams && streams.length > 0)
-          return streams;
-      }
-      return [];
-    } catch (error) {
-      console.error(`[NetMirror] Error: ${error.message}`);
-      return [];
+async function getStreams(tmdbId, mediaType, season, episode) {
+  console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
+  try {
+    const cookie = await bypass();
+    const cookies = `t_hash_t=${cookie}; hd=on`;
+    const tmdbType = mediaType === "tv" ? "tv" : "movie";
+
+    const [tmdbData, providersData] = await Promise.all([
+      fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
+      fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
+    ]);
+
+    const title = mediaType === "tv" ? tmdbData.name : tmdbData.title;
+    if (!title) throw new Error("Could not fetch title from TMDB");
+
+    const regionProviders = providersData.results?.IN ?? {};
+    const providerIds = [
+      ...(regionProviders.flatrate ?? []),
+      ...(regionProviders.free ?? []),
+      ...(regionProviders.ads ?? []),
+    ].map((p) => p.provider_id);
+
+    const platformOrder = getPlatformOrder(providerIds);
+    console.log(`[NetMirror] Platform order for "${title}": ${platformOrder.join(", ")}`);
+
+    for (const platformKey of platformOrder) {
+      const streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies);
+      if (streams && streams.length > 0) return streams;
     }
-  });
+
+    return [];
+  } catch (error) {
+    console.error(`[NetMirror] Error: ${error.message}`);
+    return [];
+  }
 }
+
 function fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies) {
   return __async(this, null, function* () {
     const platform = PLATFORM_MAP[platformKey];
