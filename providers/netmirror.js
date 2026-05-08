@@ -100,103 +100,47 @@ var BASE_HEADERS = {
   "X-Requested-With": "XMLHttpRequest"
 };
 
-// src/netmirror/subdl.js
-var SUBDL_API_KEY = "uIqS10j2ZXq1h44ejEXboUoktcC-Iv6f";
-var SUBDL_API_URL = "https://api.subdl.com/api/v1/subtitles";
-var SUBDL_DOWNLOAD_URL = "https://dl.subdl.com";
+// src/netmirror/subtitles.js
+// Extrai legendas do campo "tracks" do playlist JWPlayer retornado pelo NetMirror.
+// O NetMirror usa JWPlayer internamente, então cada item do playlist pode conter:
+//   tracks: [{ file: "https://....vtt", kind: "captions", label: "English" }, ...]
+// Mapeamos esses tracks para o formato Subtitle do Nuvio: { id, url, lang, format }
 
-// Mapa de código de idioma SubDL → label legível
-var SUBDL_LANG_LABELS = {
-  "EN": "English",
-  "PT": "Portuguese",
-  "PT-BR": "Portuguese (Brazil)",
-  "ES": "Spanish",
-  "FR": "French",
-  "DE": "German",
-  "IT": "Italian",
-  "JA": "Japanese",
-  "KO": "Korean",
-  "ZH": "Chinese",
-  "AR": "Arabic",
-  "RU": "Russian",
-  "NL": "Dutch",
-  "PL": "Polish",
-  "TR": "Turkish",
-  "SV": "Swedish",
-  "NO": "Norwegian",
-  "DA": "Danish",
-  "FI": "Finnish",
-  "HI": "Hindi",
-};
+function extractSubtitlesFromPlaylist(playlist) {
+  if (!Array.isArray(playlist)) return [];
 
-// Idiomas buscados
-var DEFAULT_SUBTITLE_LANGS = ["PT-BR", "EN"];
-var MAX_SUBTITLES_PER_LANG = 3;
+  const subtitles = [];
+  let idCounter = 0;
 
-async function fetchSubtitles(tmdbId, mediaType, season, episode) {
-  try {
-    const params = new URLSearchParams({
-      api_key: SUBDL_API_KEY,
-      tmdb_id: String(tmdbId),
-      type: mediaType === "tv" ? "tv" : "movie",
-      languages: DEFAULT_SUBTITLE_LANGS.join(","),
-    });
+  for (const item of playlist) {
+    if (!Array.isArray(item.tracks)) continue;
 
-    if (mediaType === "tv" && season != null && episode != null) {
-      params.set("season_number", String(season));
-      params.set("episode_number", String(episode));
-    }
+    for (const track of item.tracks) {
+      // Só nos interessa "captions" (legendas) — ignorar "thumbnails", "chapters", etc.
+      if (!track.file || (track.kind && track.kind !== "captions")) continue;
 
-    const url = `${SUBDL_API_URL}?${params.toString()}`;
-    console.log(`[NetMirror/SubDL] Fetching subtitles: ${url}`);
+      const fileUrl = track.file.startsWith("http")
+        ? track.file
+        : `${NETMIRROR_URL}${track.file.startsWith("/") ? "" : "/"}${track.file}`;
 
-    const resp = await fetch(url, {
-      headers: { "Accept": "application/json" }
-    });
+      // Detecta formato pelo caminho do arquivo
+      const isVtt = fileUrl.toLowerCase().includes(".vtt");
+      const format = isVtt ? "vtt" : "srt";
 
-    if (!resp.ok) {
-      console.warn(`[NetMirror/SubDL] HTTP ${resp.status}`);
-      return [];
-    }
-
-    const data = await resp.json();
-
-    if (!data.status || !Array.isArray(data.subtitles) || data.subtitles.length === 0) {
-      console.warn("[NetMirror/SubDL] No subtitles found.");
-      return [];
-    }
-
-    // Limita por idioma: no máximo MAX_SUBTITLES_PER_LANG por lang
-    const langCount = {};
-    const subtitles = [];
-
-    for (const sub of data.subtitles) {
-      const langCode = (sub.language || "").toUpperCase();
-      if (!sub.url) continue;
-
-      langCount[langCode] = langCount[langCode] || 0;
-      if (langCount[langCode] >= MAX_SUBTITLES_PER_LANG) continue;
-      langCount[langCode]++;
-
-      const fullUrl = sub.url.startsWith("http")
-        ? sub.url
-        : `${SUBDL_DOWNLOAD_URL}${sub.url}`;
-
-      // 'id' é obrigatório pelo protocolo do Nuvio (interface Subtitle)
       subtitles.push({
-        id: sub.sd_id ? String(sub.sd_id) : `subdl-${langCode}-${langCount[langCode]}`,
-        url: fullUrl,
-        lang: SUBDL_LANG_LABELS[langCode] || langCode,
-        format: "srt",
+        id: `nm-track-${++idCounter}`,
+        url: fileUrl,
+        lang: track.label || "Unknown",
+        format,
       });
     }
-
-    console.log(`[NetMirror/SubDL] Found ${subtitles.length} subtitle(s): ${subtitles.map(s => s.lang).join(", ")}`);
-    return subtitles;
-  } catch (err) {
-    console.error(`[NetMirror/SubDL] Error fetching subtitles: ${err.message}`);
-    return [];
   }
+
+  if (subtitles.length > 0) {
+    console.log(`[NetMirror] Found ${subtitles.length} embedded subtitle(s): ${subtitles.map(s => s.lang).join(", ")}`);
+  }
+
+  return subtitles;
 }
 
 // src/netmirror/utils.js
@@ -305,28 +249,14 @@ function bestMatch(results, title, mediaType) {
 async function getStreams(tmdbId, mediaType, season, episode) {
   console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
   try {
-    // Busca streams e legendas em paralelo para melhor performance
-    const [streamsResult, subtitles] = await Promise.all([
-      _fetchStreams(tmdbId, mediaType, season, episode),
-      fetchSubtitles(tmdbId, mediaType, season, episode),
-    ]);
-
-    // Injeta as legendas em cada stream retornado
-    if (subtitles.length > 0 && streamsResult.length > 0) {
-      return streamsResult.map((stream) => ({
-        ...stream,
-        subtitles,
-      }));
-    }
-
-    return streamsResult;
+    return await _fetchStreams(tmdbId, mediaType, season, episode);
   } catch (error) {
     console.error(`[NetMirror] Error: ${error.message}`);
     return [];
   }
 }
 
-// Lógica original de busca de streams, extraída para permitir Promise.all
+// Lógica de busca de streams — legendas extraídas diretamente do playlist JWPlayer
 async function _fetchStreams(tmdbId, mediaType, season, episode) {
   try {
     const cookie = await bypass();
@@ -406,17 +336,27 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     const playlist = yield playlistResp.json();
     const streams = [];
     if (Array.isArray(playlist)) {
+      // Extrai legendas embutidas no formato JWPlayer (campo "tracks")
+      const subtitles = extractSubtitlesFromPlaylist(playlist);
+
       playlist.forEach((item) => {
         if (!item.sources)
           return;
         item.sources.forEach((source) => {
-          streams.push({
+          const stream = {
             name: `NetMirror (${platformKey.charAt(0).toUpperCase() + platformKey.slice(1)})`,
             title: `${title} ${source.label}`,
             url: source.file.startsWith("http") ? source.file : `${NETMIRROR_URL}${source.file.startsWith("/") ? "" : "/"}${source.file}`,
             quality: source.label,
             headers: { Referer: `${NETMIRROR_URL}/home`, Cookie: "hd=on" }
-          });
+          };
+
+          // Injeta legendas embutidas se disponíveis
+          if (subtitles.length > 0) {
+            stream.subtitles = subtitles;
+          }
+
+          streams.push(stream);
         });
       });
     }
