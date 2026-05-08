@@ -189,14 +189,22 @@ function similarity(a, b) {
   return coverage * 0.5 + extraPenalty * 0.35 + lengthPenalty * 0.15;
 }
 
-function bestMatch(results, title) {
+function bestMatch(results, title, mediaType) {
   const normalizedTitle = normalize(title);
 
-  // Tenta match exato primeiro
-  const exact = results.find((r) => normalize(r.t) === normalizedTitle);
+  // Tenta match exato considerando o tipo de conteúdo quando disponível
+  const exact = results.find((r) => {
+    if (normalize(r.t) !== normalizedTitle) return false;
+    if (r.r) {
+      const isSeries = r.r.toLowerCase() === "series";
+      if (mediaType === "tv" && !isSeries) return false;
+      if (mediaType === "movie" && isSeries) return false;
+    }
+    return true;
+  });
   if (exact) return exact;
 
-  // Só cai no similarity se não achar exato
+  // Fallback: similarity
   return results
     .map((r) => ({ ...r, score: similarity(r.t, title) }))
     .sort((a, b) => b.score - a.score)[0];
@@ -250,7 +258,7 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     if (!searchData.searchResult || searchData.searchResult.length === 0)
       return null;
 
-    const best = bestMatch(searchData.searchResult, title);
+    const best = bestMatch(searchData.searchResult, title, mediaType);
     if (!best || best.score < 0.5) return null;
 
     const contentId = best.id;
