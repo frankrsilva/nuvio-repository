@@ -100,6 +100,102 @@ var BASE_HEADERS = {
   "X-Requested-With": "XMLHttpRequest"
 };
 
+// src/netmirror/subdl.js
+var SUBDL_API_KEY = "uIqS10j2ZXq1h44ejEXboUoktcC-Iv6f";
+var SUBDL_API_URL = "https://api.subdl.com/api/v1/subtitles";
+var SUBDL_DOWNLOAD_URL = "https://dl.subdl.com";
+
+// Mapa de código de idioma SubDL → label legível
+var SUBDL_LANG_LABELS = {
+  "EN": "English",
+  "PT": "Portuguese",
+  "PT-BR": "Portuguese (Brazil)",
+  "ES": "Spanish",
+  "FR": "French",
+  "DE": "German",
+  "IT": "Italian",
+  "JA": "Japanese",
+  "KO": "Korean",
+  "ZH": "Chinese",
+  "AR": "Arabic",
+  "RU": "Russian",
+  "NL": "Dutch",
+  "PL": "Polish",
+  "TR": "Turkish",
+  "SV": "Swedish",
+  "NO": "Norwegian",
+  "DA": "Danish",
+  "FI": "Finnish",
+  "HI": "Hindi",
+};
+
+// Idiomas buscados
+var DEFAULT_SUBTITLE_LANGS = ["PT-BR", "EN"];
+var MAX_SUBTITLES_PER_LANG = 3;
+
+async function fetchSubtitles(tmdbId, mediaType, season, episode) {
+  try {
+    const params = new URLSearchParams({
+      api_key: SUBDL_API_KEY,
+      tmdb_id: String(tmdbId),
+      type: mediaType === "tv" ? "tv" : "movie",
+      languages: DEFAULT_SUBTITLE_LANGS.join(","),
+    });
+
+    if (mediaType === "tv" && season != null && episode != null) {
+      params.set("season_number", String(season));
+      params.set("episode_number", String(episode));
+    }
+
+    const url = `${SUBDL_API_URL}?${params.toString()}`;
+    console.log(`[NetMirror/SubDL] Fetching subtitles: ${url}`);
+
+    const resp = await fetch(url, {
+      headers: { "Accept": "application/json" }
+    });
+
+    if (!resp.ok) {
+      console.warn(`[NetMirror/SubDL] HTTP ${resp.status}`);
+      return [];
+    }
+
+    const data = await resp.json();
+
+    if (!data.status || !Array.isArray(data.subtitles) || data.subtitles.length === 0) {
+      console.warn("[NetMirror/SubDL] No subtitles found.");
+      return [];
+    }
+
+    // Limita por idioma: no máximo MAX_SUBTITLES_PER_LANG por lang
+    const langCount = {};
+    const subtitles = [];
+
+    for (const sub of data.subtitles) {
+      const langCode = (sub.language || "").toUpperCase();
+      if (!sub.url) continue;
+
+      langCount[langCode] = (langCount[langCode] || 0);
+      if (langCount[langCode] >= MAX_SUBTITLES_PER_LANG) continue;
+      langCount[langCode]++;
+
+      const fullUrl = sub.url.startsWith("http")
+        ? sub.url
+        : `${SUBDL_DOWNLOAD_URL}${sub.url}`;
+
+      subtitles.push({
+        url: fullUrl,
+        lang: SUBDL_LANG_LABELS[langCode] || langCode,
+      });
+    }
+
+    console.log(`[NetMirror/SubDL] Found ${subtitles.length} subtitle(s): ${subtitles.map(s => s.lang).join(", ")}`);
+    return subtitles;
+  } catch (err) {
+    console.error(`[NetMirror/SubDL] Error fetching subtitles: ${err.message}`);
+    return [];
+  }
+}
+
 // src/netmirror/utils.js
 var globalCookie = "";
 var cookieTimestamp = 0;
@@ -171,19 +267,14 @@ function similarity(a, b) {
 
   if (a === b) return 1;
 
-  const wordsA = a.split(/\s+/); // título buscado
-  const wordsB = b.split(/\s+/); // resultado
+  const wordsA = a.split(/\s+/);
+  const wordsB = b.split(/\s+/);
   const setA = new Set(wordsA);
   const setB = new Set(wordsB);
 
-  // Quantas palavras do buscado estão no resultado
   const coverage = [...setA].filter((w) => setB.has(w)).length / setA.size;
-
-  // Palavras extras no resultado que não existem no buscado
   const extraWords = [...setB].filter((w) => !setA.has(w)).length;
   const extraPenalty = 1 - extraWords / wordsB.length;
-
-  // Penaliza diferença de tamanho
   const lengthPenalty = 1 - Math.abs(wordsA.length - wordsB.length) / Math.max(wordsA.length, wordsB.length);
 
   return coverage * 0.5 + extraPenalty * 0.35 + lengthPenalty * 0.15;
@@ -192,7 +283,6 @@ function similarity(a, b) {
 function bestMatch(results, title, mediaType) {
   const normalizedTitle = normalize(title);
 
-  // Tenta match exato considerando o tipo de conteúdo quando disponível
   const exact = results.find((r) => {
     if (normalize(r.t) !== normalizedTitle) return false;
     if (r.r) {
@@ -204,7 +294,6 @@ function bestMatch(results, title, mediaType) {
   });
   if (exact) return exact;
 
-  // Fallback: similarity
   return results
     .map((r) => ({ ...r, score: similarity(r.t, title) }))
     .sort((a, b) => b.score - a.score)[0];
@@ -212,6 +301,30 @@ function bestMatch(results, title, mediaType) {
 
 async function getStreams(tmdbId, mediaType, season, episode) {
   console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
+  try {
+    // Busca streams e legendas em paralelo para melhor performance
+    const [streamsResult, subtitles] = await Promise.all([
+      _fetchStreams(tmdbId, mediaType, season, episode),
+      fetchSubtitles(tmdbId, mediaType, season, episode),
+    ]);
+
+    // Injeta as legendas em cada stream retornado
+    if (subtitles.length > 0 && streamsResult.length > 0) {
+      return streamsResult.map((stream) => ({
+        ...stream,
+        subtitles,
+      }));
+    }
+
+    return streamsResult;
+  } catch (error) {
+    console.error(`[NetMirror] Error: ${error.message}`);
+    return [];
+  }
+}
+
+// Lógica original de busca de streams, extraída para permitir Promise.all
+async function _fetchStreams(tmdbId, mediaType, season, episode) {
   try {
     const cookie = await bypass();
     const cookies = `t_hash_t=${cookie}; hd=on`;
@@ -242,7 +355,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
     return [];
   } catch (error) {
-    console.error(`[NetMirror] Error: ${error.message}`);
+    console.error(`[NetMirror] Stream fetch error: ${error.message}`);
     return [];
   }
 }
@@ -307,6 +420,7 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     return streams;
   });
 }
+
 function getAllEpisodes(contentId, postData, platform, cookies) {
   return __async(this, null, function* () {
     const episodes = [...postData.episodes || []].filter((e) => e !== null);
@@ -324,6 +438,7 @@ function getAllEpisodes(contentId, postData, platform, cookies) {
     return episodes;
   });
 }
+
 function fetchEpisodesPage(contentId, seasonId, page, platform, cookies) {
   return __async(this, null, function* () {
     const episodes = [];
@@ -344,4 +459,5 @@ function fetchEpisodesPage(contentId, seasonId, page, platform, cookies) {
     return episodes;
   });
 }
+
 module.exports = { getStreams };
