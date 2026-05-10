@@ -102,31 +102,10 @@ var BASE_HEADERS = {
   "X-Requested-With": "XMLHttpRequest"
 };
 
-// Padrões conhecidos de URLs de vídeos de erro/rate-limit
-var RATE_LIMIT_URL_PATTERNS = [
-  /veed\.io/i,
-  /veed\.co/i,
-  /too.?many/i,
-  /rate.?limit/i,
-  /abuse/i,
-];
-
-// Labels válidos de qualidade (ex: 1080p, 720p, 480p, 360p)
-var VALID_QUALITY_PATTERN = /^\d{3,4}p$/i;
-
-function isRateLimitSource(source) {
-  // Checa URL por padrões conhecidos de erro
-  if (RATE_LIMIT_URL_PATTERNS.some((p) => p.test(source.file))) return true;
-  // Checa se o label de qualidade é inválido (vídeos de erro não têm 720p etc.)
-  if (source.label && !VALID_QUALITY_PATTERN.test(source.label)) return true;
-  return false;
-}
-
 // src/netmirror/utils.js
 var globalCookie = "";
 var cookieTimestamp = 0;
-var COOKIE_EXPIRY = 10 * 60 * 1000; // 10 minutos (era 15 horas, muito alto)
-
+var COOKIE_EXPIRY = 54e6;
 function bypass() {
   return __async(this, null, function* () {
     const now = Date.now();
@@ -160,19 +139,8 @@ function bypass() {
     throw new Error("Failed to extract t_hash_t cookie");
   });
 }
-
-function invalidateCookie() {
-  console.warn("[NetMirror] Invalidating cookie due to rate limit detection");
-  globalCookie = "";
-  cookieTimestamp = 0;
-}
-
 function getUnixTime() {
   return Math.floor(Date.now() / 1e3);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // src/netmirror/subtitles.js
@@ -198,12 +166,14 @@ async function fetchSubtitles(imdbId, mediaType, season, episode) {
     if (!data.status || !data.subtitles || data.subtitles.length === 0)
       return [];
 
+    // Mapeia lang do SubDL para código ISO
     const langMap = {
       english: "en",
       portuguese: "pt",
       "brazilian portuguese": "pt",
     };
 
+    // Pega a primeira legenda de cada idioma
     const seen = new Set();
     const subtitles = [];
 
@@ -219,6 +189,7 @@ async function fetchSubtitles(imdbId, mediaType, season, episode) {
         lang,
       });
 
+      // Só precisa de EN e PT
       if (seen.size === 2) break;
     }
 
@@ -298,6 +269,7 @@ async function getStreams(imdbId, tmdbId, mediaType, season, episode) {
     const cookies = `t_hash_t=${cookie}; hd=on`;
     const tmdbType = mediaType === "tv" ? "tv" : "movie";
 
+    // Busca título, provedores e legendas em paralelo
     const [tmdbData, providersData, subtitles] = await Promise.all([
       fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
       fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
@@ -318,9 +290,6 @@ async function getStreams(imdbId, tmdbId, mediaType, season, episode) {
     console.log(`[NetMirror] Platform order for "${title}": ${platformOrder.join(", ")}`);
 
     for (const platformKey of platformOrder) {
-      // Pequeno delay entre plataformas para reduzir frequência de requisições
-      await sleep(500);
-
       const streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies, subtitles);
       if (streams && streams.length > 0) return streams;
     }
@@ -373,26 +342,14 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     });
     const playlist = yield playlistResp.json();
     const streams = [];
-    let rateLimitDetected = false;
-
     if (Array.isArray(playlist)) {
       playlist.forEach((item) => {
         if (!item.sources) return;
         item.sources.forEach((source) => {
-          if (isRateLimitSource(source)) {
-            console.warn(`[NetMirror] Rate limit video detected on ${platformKey}: ${source.file}`);
-            rateLimitDetected = true;
-            return; // descarta essa source
-          }
-
-          const url = source.file.startsWith("http")
-            ? source.file
-            : `${NETMIRROR_URL}${source.file.startsWith("/") ? "" : "/"}${source.file}`;
-
           streams.push({
             name: `NetMirror (${platformKey.charAt(0).toUpperCase() + platformKey.slice(1)})`,
             title: `${title} ${source.label}`,
-            url,
+            url: source.file.startsWith("http") ? source.file : `${NETMIRROR_URL}${source.file.startsWith("/") ? "" : "/"}${source.file}`,
             quality: source.label,
             headers: { Referer: `${NETMIRROR_URL}/home`, Cookie: "hd=on" },
             subtitles: subtitles.length > 0 ? subtitles : undefined,
@@ -400,13 +357,6 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
         });
       });
     }
-
-    // Se detectou rate limit, invalida o cookie para forçar renovação na próxima chamada
-    if (rateLimitDetected) {
-      invalidateCookie();
-      return null;
-    }
-
     return streams;
   });
 }
