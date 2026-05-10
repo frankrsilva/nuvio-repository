@@ -45,6 +45,8 @@ var __async = (__this, __arguments, generator) => {
 // src/netmirror/constants.js
 var NETMIRROR_URL = "https://net52.cc";
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
+var SUBDL_API_KEY = "uIqS10j2ZXq1h44ejEXboUoktcC-Iv6f";
+var SUBDL_URL = "https://api.subdl.com/api/v1/subtitles";
 var PLATFORM_MAP = {
   netflix: {
     ott: "nf",
@@ -100,53 +102,31 @@ var BASE_HEADERS = {
   "X-Requested-With": "XMLHttpRequest"
 };
 
-// src/netmirror/subtitles.js
-// Extrai legendas do campo "tracks" do playlist JWPlayer retornado pelo NetMirror.
-// O NetMirror usa JWPlayer internamente, então cada item do playlist pode conter:
-//   tracks: [{ file: "https://....vtt", kind: "captions", label: "English" }, ...]
-// Mapeamos esses tracks para o formato Subtitle do Nuvio: { id, url, lang, format }
+// Padrões conhecidos de URLs de vídeos de erro/rate-limit
+var RATE_LIMIT_URL_PATTERNS = [
+  /veed\.io/i,
+  /veed\.co/i,
+  /too.?many/i,
+  /rate.?limit/i,
+  /abuse/i,
+];
 
-function extractSubtitlesFromPlaylist(playlist) {
-  if (!Array.isArray(playlist)) return [];
+// Labels válidos de qualidade (ex: 1080p, 720p, 480p, 360p)
+var VALID_QUALITY_PATTERN = /^\d{3,4}p$/i;
 
-  const subtitles = [];
-  let idCounter = 0;
-
-  for (const item of playlist) {
-    if (!Array.isArray(item.tracks)) continue;
-
-    for (const track of item.tracks) {
-      // Só nos interessa "captions" (legendas) — ignorar "thumbnails", "chapters", etc.
-      if (!track.file || (track.kind && track.kind !== "captions")) continue;
-
-      const fileUrl = track.file.startsWith("http")
-        ? track.file
-        : `${NETMIRROR_URL}${track.file.startsWith("/") ? "" : "/"}${track.file}`;
-
-      // Detecta formato pelo caminho do arquivo
-      const isVtt = fileUrl.toLowerCase().includes(".vtt");
-      const format = isVtt ? "vtt" : "srt";
-
-      subtitles.push({
-        id: `nm-track-${++idCounter}`,
-        url: fileUrl,
-        lang: track.label || "Unknown",
-        format,
-      });
-    }
-  }
-
-  if (subtitles.length > 0) {
-    console.log(`[NetMirror] Found ${subtitles.length} embedded subtitle(s): ${subtitles.map(s => s.lang).join(", ")}`);
-  }
-
-  return subtitles;
+function isRateLimitSource(source) {
+  // Checa URL por padrões conhecidos de erro
+  if (RATE_LIMIT_URL_PATTERNS.some((p) => p.test(source.file))) return true;
+  // Checa se o label de qualidade é inválido (vídeos de erro não têm 720p etc.)
+  if (source.label && !VALID_QUALITY_PATTERN.test(source.label)) return true;
+  return false;
 }
 
 // src/netmirror/utils.js
 var globalCookie = "";
 var cookieTimestamp = 0;
-var COOKIE_EXPIRY = 54e6;
+var COOKIE_EXPIRY = 10 * 60 * 1000; // 10 minutos (era 15 horas, muito alto)
+
 function bypass() {
   return __async(this, null, function* () {
     const now = Date.now();
@@ -180,8 +160,73 @@ function bypass() {
     throw new Error("Failed to extract t_hash_t cookie");
   });
 }
+
+function invalidateCookie() {
+  console.warn("[NetMirror] Invalidating cookie due to rate limit detection");
+  globalCookie = "";
+  cookieTimestamp = 0;
+}
+
 function getUnixTime() {
   return Math.floor(Date.now() / 1e3);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// src/netmirror/subtitles.js
+async function fetchSubtitles(imdbId, mediaType, season, episode) {
+  try {
+    const type = mediaType === "tv" ? "tv" : "movie";
+    const params = new URLSearchParams({
+      api_key: SUBDL_API_KEY,
+      imdb_id: imdbId,
+      languages: "EN,PT",
+      type,
+      subs_per_page: "5",
+    });
+
+    if (mediaType === "tv") {
+      params.set("season_number", season);
+      params.set("episode_number", episode);
+    }
+
+    const resp = await fetch(`${SUBDL_URL}?${params}`);
+    const data = await resp.json();
+
+    if (!data.status || !data.subtitles || data.subtitles.length === 0)
+      return [];
+
+    const langMap = {
+      english: "en",
+      portuguese: "pt",
+      "brazilian portuguese": "pt",
+    };
+
+    const seen = new Set();
+    const subtitles = [];
+
+    for (const sub of data.subtitles) {
+      const lang = langMap[sub.lang?.toLowerCase()] ?? sub.lang?.slice(0, 2).toLowerCase();
+      if (!lang || seen.has(lang)) continue;
+      if (!sub.download_link) continue;
+
+      seen.add(lang);
+      subtitles.push({
+        id: `subdl-${lang}`,
+        url: sub.download_link,
+        lang,
+      });
+
+      if (seen.size === 2) break;
+    }
+
+    return subtitles;
+  } catch (err) {
+    console.error(`[NetMirror] SubDL error: ${err.message}`);
+    return [];
+  }
 }
 
 // src/netmirror/index.js
@@ -246,26 +291,17 @@ function bestMatch(results, title, mediaType) {
     .sort((a, b) => b.score - a.score)[0];
 }
 
-async function getStreams(tmdbId, mediaType, season, episode) {
+async function getStreams(imdbId, tmdbId, mediaType, season, episode) {
   console.log(`[NetMirror] Fetching streams for ${mediaType} ${tmdbId}`);
-  try {
-    return await _fetchStreams(tmdbId, mediaType, season, episode);
-  } catch (error) {
-    console.error(`[NetMirror] Error: ${error.message}`);
-    return [];
-  }
-}
-
-// Lógica de busca de streams — legendas extraídas diretamente do playlist JWPlayer
-async function _fetchStreams(tmdbId, mediaType, season, episode) {
   try {
     const cookie = await bypass();
     const cookies = `t_hash_t=${cookie}; hd=on`;
     const tmdbType = mediaType === "tv" ? "tv" : "movie";
 
-    const [tmdbData, providersData] = await Promise.all([
+    const [tmdbData, providersData, subtitles] = await Promise.all([
       fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
       fetch(`https://api.themoviedb.org/3/${tmdbType}/${tmdbId}/watch/providers?api_key=${TMDB_API_KEY}`).then((r) => r.json()),
+      fetchSubtitles(imdbId, mediaType, season, episode),
     ]);
 
     const title = mediaType === "tv" ? tmdbData.name : tmdbData.title;
@@ -282,18 +318,21 @@ async function _fetchStreams(tmdbId, mediaType, season, episode) {
     console.log(`[NetMirror] Platform order for "${title}": ${platformOrder.join(", ")}`);
 
     for (const platformKey of platformOrder) {
-      const streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies);
+      // Pequeno delay entre plataformas para reduzir frequência de requisições
+      await sleep(500);
+
+      const streams = await fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies, subtitles);
       if (streams && streams.length > 0) return streams;
     }
 
     return [];
   } catch (error) {
-    console.error(`[NetMirror] Stream fetch error: ${error.message}`);
+    console.error(`[NetMirror] Error: ${error.message}`);
     return [];
   }
 }
 
-function fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies) {
+function fetchFromPlatform(platformKey, title, mediaType, season, episode, cookies, subtitles) {
   return __async(this, null, function* () {
     const platform = PLATFORM_MAP[platformKey];
     const searchUrl = `${NETMIRROR_URL}${platform.search}?s=${encodeURIComponent(title)}&t=${getUnixTime()}`;
@@ -317,8 +356,7 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     if (mediaType === "tv") {
       const episodes = yield getAllEpisodes(contentId, postData, platform, cookies);
       const targetEp = episodes.find((ep) => {
-        if (!ep)
-          return false;
+        if (!ep) return false;
         const s = parseInt(ep.s.replace("S", ""));
         const e = parseInt(ep.ep.replace("E", ""));
         return s === season && e === episode;
@@ -335,31 +373,40 @@ function fetchFromPlatform(platformKey, title, mediaType, season, episode, cooki
     });
     const playlist = yield playlistResp.json();
     const streams = [];
+    let rateLimitDetected = false;
+
     if (Array.isArray(playlist)) {
-      // Extrai legendas embutidas no formato JWPlayer (campo "tracks")
-      const subtitles = extractSubtitlesFromPlaylist(playlist);
-
       playlist.forEach((item) => {
-        if (!item.sources)
-          return;
+        if (!item.sources) return;
         item.sources.forEach((source) => {
-          const stream = {
-            name: `NetMirror (${platformKey.charAt(0).toUpperCase() + platformKey.slice(1)})`,
-            title: `${title} ${source.label}`,
-            url: source.file.startsWith("http") ? source.file : `${NETMIRROR_URL}${source.file.startsWith("/") ? "" : "/"}${source.file}`,
-            quality: source.label,
-            headers: { Referer: `${NETMIRROR_URL}/home`, Cookie: "hd=on" }
-          };
-
-          // Injeta legendas embutidas se disponíveis
-          if (subtitles.length > 0) {
-            stream.subtitles = subtitles;
+          if (isRateLimitSource(source)) {
+            console.warn(`[NetMirror] Rate limit video detected on ${platformKey}: ${source.file}`);
+            rateLimitDetected = true;
+            return; // descarta essa source
           }
 
-          streams.push(stream);
+          const url = source.file.startsWith("http")
+            ? source.file
+            : `${NETMIRROR_URL}${source.file.startsWith("/") ? "" : "/"}${source.file}`;
+
+          streams.push({
+            name: `NetMirror (${platformKey.charAt(0).toUpperCase() + platformKey.slice(1)})`,
+            title: `${title} ${source.label}`,
+            url,
+            quality: source.label,
+            headers: { Referer: `${NETMIRROR_URL}/home`, Cookie: "hd=on" },
+            subtitles: subtitles.length > 0 ? subtitles : undefined,
+          });
         });
       });
     }
+
+    // Se detectou rate limit, invalida o cookie para forçar renovação na próxima chamada
+    if (rateLimitDetected) {
+      invalidateCookie();
+      return null;
+    }
+
     return streams;
   });
 }
@@ -395,8 +442,7 @@ function fetchEpisodesPage(contentId, seasonId, page, platform, cookies) {
       if (data.episodes) {
         episodes.push(...data.episodes.filter((e) => e !== null));
       }
-      if (data.nextPageShow === 0)
-        break;
+      if (data.nextPageShow === 0) break;
       pg++;
     }
     return episodes;
